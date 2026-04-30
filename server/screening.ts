@@ -2,10 +2,10 @@ import type {
   CompoundProperties,
   BBBScreening,
   CYP2E1Screening,
-  CYP450FamilyScreening,
-  CYP450IsoformInhibition,
   ScreeningResult,
   PotentialLevel,
+  ScreeningConfidence,
+  ConfidenceLevel,
 } from "../shared/types";
 
 // ─── PubChem API ───────────────────────────────────────────────────────────────
@@ -234,323 +234,6 @@ function hasPhenylRing(smiles: string): boolean {
   return false;
 }
 
-function scoreToPotential(score: number, max: number): PotentialLevel {
-  const ratio = max > 0 ? score / max : 0;
-  if (ratio >= 0.75) return "Very High";
-  if (ratio >= 0.55) return "High";
-  if (ratio >= 0.35) return "Moderate";
-  return "Low";
-}
-
-function basicCYPScoreBase(compound: CompoundProperties) {
-  const smiles = (compound.smiles ?? "").trim();
-  const mw = compound.mw ?? null;
-  const logP = compound.logP ?? null;
-
-  const aromaticRings = smiles ? countAromaticRings(smiles) : 0;
-  const hasPhenyl = smiles ? hasPhenylRing(smiles) : false;
-  const hasNHet = smiles ? hasNHeterocycle(smiles) : false;
-  const hasS = smiles ? hasSulfurAtom(smiles) : false;
-
-  return {
-    smiles,
-    mw,
-    logP,
-    aromaticRings,
-    hasPhenyl,
-    hasNHet,
-    hasS,
-  };
-}
-
-function makeIsoform(
-  isoform: string,
-  score: number,
-  features: string[],
-  evidence?: CYP450IsoformInhibition["evidence"]
-): CYP450IsoformInhibition {
-  const max = 10;
-  const clamped = Math.max(0, Math.min(max, Math.round(score)));
-  return {
-    isoform,
-    score: clamped,
-    potential: scoreToPotential(clamped, max),
-    features,
-    evidence,
-  };
-}
-
-export function screenCYP450Family(
-  compound: CompoundProperties,
-  cyp2e1Detailed?: CYP2E1Screening,
-  evidence?: Record<string, { evidenceCount: number; best: any | null }>
-): CYP450FamilyScreening {
-  const b = basicCYPScoreBase(compound);
-
-  const isoforms: CYP450IsoformInhibition[] = [];
-
-  const add = (i: CYP450IsoformInhibition) => isoforms.push(i);
-
-  // --- Heuristic notes ---
-  // This is a lightweight, rule-based estimate meant for quick screening.
-  // It is NOT a validated predictor.
-
-  // CYP3A4: large, flexible, lipophilic substrates/inhibitors
-  {
-    let score = 0;
-    const f: string[] = [];
-    if (b.mw != null) {
-      if (b.mw >= 300) {
-        score += 3;
-        f.push("MW≥300");
-      } else if (b.mw >= 200) {
-        score += 2;
-        f.push("MW≥200");
-      }
-    }
-    if (b.logP != null) {
-      if (b.logP >= 3) {
-        score += 3;
-        f.push("LogP≥3");
-      } else if (b.logP >= 2) {
-        score += 2;
-        f.push("LogP≥2");
-      }
-    }
-    if (b.aromaticRings >= 2) {
-      score += 2;
-      f.push("≥2 aromatic rings");
-    }
-    if (b.hasS) {
-      score += 1;
-      f.push("contains S");
-    }
-    add(makeIsoform("CYP3A4", score, f, evidence?.CYP3A4));
-  }
-
-  // CYP2D6: often inhibited by basic nitrogen / N-heterocycles
-  {
-    let score = 0;
-    const f: string[] = [];
-    if (b.hasNHet) {
-      score += 4;
-      f.push("N-heterocycle / basic N pattern");
-    }
-    if (b.logP != null && b.logP >= 2) {
-      score += 2;
-      f.push("LogP≥2");
-    }
-    if (b.aromaticRings >= 1) {
-      score += 2;
-      f.push("aromatic ring");
-    }
-    if (b.mw != null && b.mw >= 250) {
-      score += 1;
-      f.push("MW≥250");
-    }
-    add(makeIsoform("CYP2D6", score, f, evidence?.CYP2D6));
-  }
-
-  // CYP1A2: planar polyaromatic compounds tend to interact
-  {
-    let score = 0;
-    const f: string[] = [];
-    if (b.aromaticRings >= 2) {
-      score += 5;
-      f.push("≥2 aromatic rings (planarity proxy)");
-    } else if (b.aromaticRings >= 1) {
-      score += 2;
-      f.push("aromatic ring");
-    }
-    if (b.logP != null && b.logP >= 2) {
-      score += 2;
-      f.push("LogP≥2");
-    }
-    if (b.mw != null && b.mw <= 400) {
-      score += 1;
-      f.push("MW≤400");
-    }
-    add(makeIsoform("CYP1A2", score, f, evidence?.CYP1A2));
-  }
-
-  // CYP2C9: lipophilic + aromatic; many acidic drugs (not detected here), so we use broad proxy
-  {
-    let score = 0;
-    const f: string[] = [];
-    if (b.hasPhenyl) {
-      score += 3;
-      f.push("phenyl/aromatic motif");
-    }
-    if (b.logP != null) {
-      if (b.logP >= 3) {
-        score += 3;
-        f.push("LogP≥3");
-      } else if (b.logP >= 2) {
-        score += 2;
-        f.push("LogP≥2");
-      }
-    }
-    if (b.mw != null && b.mw >= 250) {
-      score += 2;
-      f.push("MW≥250");
-    }
-    if (b.hasS) {
-      score += 1;
-      f.push("contains S");
-    }
-    add(makeIsoform("CYP2C9", score, f, evidence?.CYP2C9));
-  }
-
-  // CYP2C19: similar to 2C9 but slightly more tolerant of heteroatoms
-  {
-    let score = 0;
-    const f: string[] = [];
-    if (b.hasPhenyl) {
-      score += 3;
-      f.push("aromatic motif");
-    }
-    if (b.hasNHet) {
-      score += 2;
-      f.push("N-heterocycle");
-    }
-    if (b.logP != null && b.logP >= 2.5) {
-      score += 3;
-      f.push("LogP≥2.5");
-    } else if (b.logP != null && b.logP >= 1.5) {
-      score += 2;
-      f.push("LogP≥1.5");
-    }
-    if (b.mw != null && b.mw >= 250) {
-      score += 1;
-      f.push("MW≥250");
-    }
-    add(makeIsoform("CYP2C19", score, f, evidence?.CYP2C19));
-  }
-
-  // CYP2B6: moderate-sized, lipophilic compounds
-  {
-    let score = 0;
-    const f: string[] = [];
-    if (b.logP != null && b.logP >= 2) {
-      score += 3;
-      f.push("LogP≥2");
-    }
-    if (b.mw != null) {
-      if (b.mw >= 250) {
-        score += 3;
-        f.push("MW≥250");
-      } else if (b.mw >= 180) {
-        score += 2;
-        f.push("MW≥180");
-      }
-    }
-    if (b.aromaticRings >= 1) {
-      score += 2;
-      f.push("aromatic ring");
-    }
-    add(makeIsoform("CYP2B6", score, f, evidence?.CYP2B6));
-  }
-
-  // CYP2A6: often small/medium, heteroatom-containing aromatics
-  {
-    let score = 0;
-    const f: string[] = [];
-    if (b.mw != null && b.mw <= 350) {
-      score += 2;
-      f.push("MW≤350");
-    }
-    if (b.aromaticRings >= 1) {
-      score += 3;
-      f.push("aromatic ring");
-    }
-    if (b.hasNHet) {
-      score += 2;
-      f.push("N-heterocycle");
-    }
-    if (b.logP != null && b.logP >= 1.5) {
-      score += 2;
-      f.push("LogP≥1.5");
-    }
-    add(makeIsoform("CYP2A6", score, f, evidence?.CYP2A6));
-  }
-
-  // CYP2C8: larger, lipophilic substrates
-  {
-    let score = 0;
-    const f: string[] = [];
-    if (b.mw != null && b.mw >= 300) {
-      score += 4;
-      f.push("MW≥300");
-    } else if (b.mw != null && b.mw >= 250) {
-      score += 3;
-      f.push("MW≥250");
-    }
-    if (b.logP != null && b.logP >= 2.5) {
-      score += 3;
-      f.push("LogP≥2.5");
-    }
-    if (b.aromaticRings >= 1) {
-      score += 2;
-      f.push("aromatic ring");
-    }
-    add(makeIsoform("CYP2C8", score, f, evidence?.CYP2C8));
-  }
-
-  // CYP3A5: similar to 3A4
-  {
-    const base3a4 = isoforms.find(x => x.isoform === "CYP3A4")?.score ?? 0;
-    add(
-      makeIsoform(
-        "CYP3A5",
-        Math.max(0, base3a4 - 1),
-        ["similar to CYP3A4"],
-        evidence?.CYP3A5
-      )
-    );
-  }
-
-  // CYP2E1: we map the existing detailed score (0–14) into 0–10
-  {
-    const detailed = cyp2e1Detailed;
-    if (detailed) {
-      const mapped = Math.round((detailed.score / 14) * 10);
-      add(
-        makeIsoform(
-          "CYP2E1",
-          mapped,
-          [`mapped from detailed CYP2E1 score (${detailed.score}/14)`],
-          evidence?.CYP2E1
-        )
-      );
-    } else {
-      // Fallback: very small + moderate lipophilicity
-      let score = 0;
-      const f: string[] = [];
-      if (b.mw != null && b.mw <= 300) {
-        score += 3;
-        f.push("MW≤300");
-      }
-      if (b.logP != null && b.logP >= 1.5 && b.logP <= 4) {
-        score += 3;
-        f.push("1.5≤LogP≤4");
-      }
-      if (b.hasPhenyl) {
-        score += 2;
-        f.push("aromatic motif");
-      }
-      if (b.hasNHet) {
-        score += 1;
-        f.push("N-heterocycle");
-      }
-      add(makeIsoform("CYP2E1", score, f, evidence?.CYP2E1));
-    }
-  }
-
-  const top = [...isoforms].sort((a, b) => b.score - a.score).slice(0, 10);
-
-  return { isoforms, top };
-}
-
 export function screenCYP2E1(compound: CompoundProperties): CYP2E1Screening {
   const { mw, logP, smiles, hbd, hba } = compound;
   const smilesStr = smiles ?? "";
@@ -680,53 +363,165 @@ export function screenCYP2E1(compound: CompoundProperties): CYP2E1Screening {
   };
 }
 
+// ─── Confidence + Ranking (reduce false positives) ─────────────────────────────
+
+function toConfidenceLevel(score: number): ConfidenceLevel {
+  if (score >= 75) return "High";
+  if (score >= 50) return "Medium";
+  return "Low";
+}
+
+function clamp01(x: number) {
+  return Math.max(0, Math.min(1, x));
+}
+
+function computeBBBConfidence(
+  compound: CompoundProperties,
+  bbb: BBBScreening
+): { score: number; level: ConfidenceLevel; reasons: string[]; flags: string[] } {
+  const reasons: string[] = [];
+  const flags: string[] = [];
+
+  // Missing critical inputs → low confidence
+  const missing: string[] = [];
+  if (compound.mw == null) missing.push("MW");
+  if (compound.logP == null) missing.push("LogP");
+  if (compound.tpsa == null) missing.push("TPSA");
+  if (compound.hbd == null) missing.push("HBD");
+  if (compound.hba == null) missing.push("HBA");
+  if (missing.length) reasons.push(`Missing inputs: ${missing.join(", ")}`);
+
+  // Applicability domain
+  let adPenalty = 0;
+  if (compound.mw != null && (compound.mw < 80 || compound.mw > 600)) {
+    adPenalty += 0.25;
+    reasons.push("Outside typical MW domain (80–600)");
+  }
+  if (compound.tpsa != null && (compound.tpsa < 0 || compound.tpsa > 160)) {
+    adPenalty += 0.25;
+    reasons.push("Outside typical TPSA domain (0–160)");
+  }
+  if (compound.logP != null && (compound.logP < -1 || compound.logP > 7)) {
+    adPenalty += 0.25;
+    reasons.push("Outside typical LogP domain (-1–7)");
+  }
+
+  // Consensus
+  const agree = Number(bbb.boiledEgg) + Number(bbb.admetlab);
+  if (agree === 2) reasons.push("BOILED-Egg agrees with ADMETlab rules");
+  if (agree === 0) reasons.push("BOILED-Egg disagrees with ADMETlab rules (both negative)");
+
+  // Kp,uu proxy availability
+  if (bbb.kpuuBrain == null) reasons.push("Kp,uu,brain proxy unavailable");
+
+  // Chemotype flags (simple heuristics)
+  const smiles = compound.smiles ?? "";
+  if (smiles) {
+    if (/S(=S)|NCS|C\(=S\)S|C\(S\)\(S\)/.test(smiles)) {
+      flags.push("Reactive/thiocarbonyl motif (possible conjugation/complex)");
+      reasons.push("Sulfur-rich motif may break BBB proxy assumptions");
+      adPenalty += 0.15;
+    }
+  }
+
+  const completeness = 1 - missing.length / 5; // 0..1
+  const consensus = agree / 2; // 0..1
+  const kpuuBonus = bbb.kpuuBrain != null ? 1 : 0.6;
+
+  const raw = 100 * (0.45 * completeness + 0.35 * consensus + 0.2 * kpuuBonus);
+  const score = Math.round(raw * (1 - clamp01(adPenalty)));
+  const level = toConfidenceLevel(score);
+
+  return { score, level, reasons, flags };
+}
+
+function computeCYP2E1Confidence(
+  compound: CompoundProperties,
+  cyp2e1: CYP2E1Screening
+): { score: number; level: ConfidenceLevel; reasons: string[]; flags: string[] } {
+  const reasons: string[] = [];
+  const flags: string[] = [];
+
+  if (!compound.smiles) {
+    reasons.push("Missing SMILES; CYP2E1 rule-based screening may be unreliable");
+    return { score: 30, level: "Low", reasons, flags };
+  }
+
+  reasons.push("CYP2E1 screening is rule-based (not a measured IC50)");
+
+  const featureCount = cyp2e1.features.length;
+  const hasHeme = cyp2e1.features.some(f => f.toLowerCase().includes("heme"));
+
+  let score = 55;
+  if (featureCount >= 3) score += 10;
+  if (hasHeme) score += 10;
+  if (compound.mw == null || compound.logP == null) {
+    score -= 10;
+    reasons.push("Missing MW/LogP reduces rule evaluation confidence");
+  }
+
+  if (cyp2e1.features.some(f => f.toLowerCase().includes("sulfur"))) {
+    flags.push("Sulfur heme-ligation motif (watch reactivity/off-target)");
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  const level = toConfidenceLevel(score);
+  return { score, level, reasons, flags };
+}
+
+export function computeConfidenceAndRank(
+  compound: CompoundProperties,
+  bbb: BBBScreening,
+  cyp2e1: CYP2E1Screening,
+  options?: { weightBBB?: number; weightCYP?: number }
+): { confidence: ScreeningConfidence; rankScore: number } {
+  const wBBB = options?.weightBBB ?? 0.6;
+  const wCYP = options?.weightCYP ?? 0.4;
+
+  const b = computeBBBConfidence(compound, bbb);
+  const c = computeCYP2E1Confidence(compound, cyp2e1);
+
+  const flags = Array.from(new Set([...b.flags, ...c.flags]));
+
+  const potTo01 = (p: PotentialLevel) =>
+    p === "Very High" ? 1 : p === "High" ? 0.75 : p === "Moderate" ? 0.45 : 0.2;
+
+  const bbbStrength = potTo01(bbb.bbbPotential);
+  const cypStrength = potTo01(cyp2e1.potential);
+
+  const strengthScore = 100 * (wBBB * bbbStrength + wCYP * cypStrength);
+  const confidencePenalty = 0.35 * (100 - Math.min(b.score, c.score));
+  const rankScore = Math.round(Math.max(0, Math.min(100, strengthScore - confidencePenalty)));
+
+  const overallScore = Math.round((b.score + c.score) / 2);
+  const overallLevel = toConfidenceLevel(overallScore);
+
+  return {
+    confidence: {
+      bbb: { score: b.score, level: b.level, reasons: b.reasons },
+      cyp2e1: { score: c.score, level: c.level, reasons: c.reasons },
+      overall: {
+        score: overallScore,
+        level: overallLevel,
+        reasons: [
+          `BBB confidence: ${b.level} (${b.score}/100)`,
+          `CYP2E1 confidence: ${c.level} (${c.score}/100)`,
+        ],
+      },
+      flags,
+    },
+    rankScore,
+  };
+}
+
 // ─── Full Screening Pipeline ───────────────────────────────────────────────────
 
 export async function screenCompound(name: string): Promise<ScreeningResult> {
   const compound = await fetchCompoundFromPubChem(name);
   const bbb = screenBBB(compound);
   const cyp2e1 = screenCYP2E1(compound);
-
-  // Best-effort evidence from ChEMBL (non-blocking). If it fails, fall back to model.
-  let cyp450 = screenCYP450Family(compound, cyp2e1);
-  try {
-    const {
-      resolveMoleculeChemblIdBySmiles,
-      fetchChemblCypEvidenceByMoleculeChemblId,
-    } = await import("./_core/chemblCyp");
-
-    const smiles = compound.smiles ?? "";
-    const molId = smiles ? await resolveMoleculeChemblIdBySmiles(smiles) : null;
-    if (molId) {
-      const evidenceRows = await fetchChemblCypEvidenceByMoleculeChemblId({
-        moleculeChemblId: molId,
-      });
-
-      const evidenceMap: Record<
-        string,
-        { evidenceCount: number; best: any | null }
-      > = {};
-      for (const r of evidenceRows) {
-        evidenceMap[r.isoform] = {
-          evidenceCount: r.evidenceCount,
-          best: r.best,
-        };
-      }
-
-      cyp450 = {
-        ...screenCYP450Family(compound, cyp2e1, evidenceMap),
-        evidenceMeta: {
-          source: "ChEMBL",
-          moleculeChEMBLId: molId,
-          fetchedAt: new Date().toISOString(),
-        },
-      };
-    }
-  } catch {
-    // ignore
-  }
-
-  return { compound, bbb, cyp2e1, cyp450 };
+  const { confidence, rankScore } = computeConfidenceAndRank(compound, bbb, cyp2e1);
+  return { compound, bbb, cyp2e1, confidence, rankScore };
 }
 
 export async function screenCompounds(

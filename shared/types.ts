@@ -9,6 +9,24 @@ export * from "./_core/errors";
 /** Potential level for BBB and CYP2E1 screening */
 export type PotentialLevel = "Very High" | "High" | "Moderate" | "Low";
 
+/** Confidence level for model trustworthiness */
+export type ConfidenceLevel = "High" | "Medium" | "Low";
+
+export interface ConfidenceBlock {
+  /** 0-100 */
+  score: number;
+  level: ConfidenceLevel;
+  reasons: string[];
+}
+
+export interface ScreeningConfidence {
+  bbb: ConfidenceBlock;
+  cyp2e1: ConfidenceBlock;
+  overall: ConfidenceBlock;
+  /** Risk flags that often drive false positives (e.g., reactive/chelator) */
+  flags: string[];
+}
+
 /** Raw physicochemical properties from PubChem */
 export interface CompoundProperties {
   name: string;
@@ -39,47 +57,7 @@ export interface BBBScreening {
   bbbPotential: PotentialLevel;
 }
 
-/** CYP450 isoform inhibition (rule-based estimate) */
-export interface CYP450IsoformInhibition {
-  /** e.g. "CYP3A4", "CYP2D6" */
-  isoform: string;
-  /** Total inhibition score (higher = more likely inhibitor). Scale: 0–10 */
-  score: number;
-  /** Overall inhibition potential */
-  potential: PotentialLevel;
-  /** Key structural features identified (brief) */
-  features: string[];
-  /** Evidence summary if available (ChEMBL) */
-  evidence?: {
-    evidenceCount: number;
-    best?: {
-      standardType: string;
-      standardValue: number;
-      standardUnits: string;
-      relation: string | null;
-      pchemblValue: number | null;
-      assayChEMBLId: string | null;
-      documentChEMBLId: string | null;
-      moleculeChEMBLId: string | null;
-    } | null;
-  };
-}
-
-/** CYP450 family inhibition screening result */
-export interface CYP450FamilyScreening {
-  /** All isoforms we evaluated */
-  isoforms: CYP450IsoformInhibition[];
-  /** Sort helper: top inhibitors (desc) */
-  top: CYP450IsoformInhibition[];
-  /** Evidence meta */
-  evidenceMeta?: {
-    source: "ChEMBL";
-    moleculeChEMBLId: string;
-    fetchedAt: string;
-  };
-}
-
-/** CYP2E1 inhibition screening result (detailed breakdown) */
+/** CYP2E1 inhibition screening result */
 export interface CYP2E1Screening {
   /** Total inhibition score */
   score: number;
@@ -100,8 +78,9 @@ export interface CYP2E1Screening {
 export interface ScreeningResult {
   compound: CompoundProperties;
   bbb: BBBScreening;
-  /** Detailed CYP2E1-only analysis */
   cyp2e1: CYP2E1Screening;
-  /** Optional broader CYP450 family estimate (kept optional for backward compatibility) */
-  cyp450?: CYP450FamilyScreening;
+  /** Model confidence report (helps reduce false positives) */
+  confidence?: ScreeningConfidence;
+  /** Overall ranking score (0-100) for prioritization */
+  rankScore?: number;
 }

@@ -8,7 +8,6 @@ import {
   screenCompounds,
   screenBBB,
   screenCYP2E1,
-  screenCYP450Family,
 } from "./screening";
 import {
   saveScreeningSession,
@@ -177,14 +176,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ input, ctx }) => {
-        const {
-          resolveMoleculeChemblIdBySmiles,
-          fetchChemblCypEvidenceByMoleculeChemblId,
-        } = await import("./_core/chemblCyp");
-
-        const buildOne = async (
-          compoundData: z.infer<typeof compoundDataSchema>
-        ) => {
+        const results: ScreeningResult[] = input.compounds.map(compoundData => {
           const compound: CompoundProperties = {
             name: compoundData.name,
             cid: compoundData.cid,
@@ -197,68 +189,10 @@ export const appRouter = router({
             status: compoundData.status,
             errorMessage: compoundData.errorMessage,
           };
-
           const bbb = screenBBB(compound);
           const cyp2e1 = screenCYP2E1(compound);
-
-          // Model baseline (always available)
-          let cyp450 = screenCYP450Family(compound, cyp2e1);
-
-          // Evidence-first (best-effort)
-          try {
-            const smiles = compound.smiles ?? "";
-            const molId = smiles
-              ? await resolveMoleculeChemblIdBySmiles(smiles)
-              : null;
-
-            if (molId) {
-              const evidenceRows =
-                await fetchChemblCypEvidenceByMoleculeChemblId({
-                  moleculeChemblId: molId,
-                });
-
-              const evidenceMap: Record<
-                string,
-                { evidenceCount: number; best: any | null }
-              > = {};
-              for (const r of evidenceRows) {
-                evidenceMap[r.isoform] = {
-                  evidenceCount: r.evidenceCount,
-                  best: r.best,
-                };
-              }
-
-              cyp450 = {
-                ...screenCYP450Family(compound, cyp2e1, evidenceMap),
-                evidenceMeta: {
-                  source: "ChEMBL",
-                  moleculeChEMBLId: molId,
-                  fetchedAt: new Date().toISOString(),
-                },
-              };
-            }
-          } catch {
-            // ignore
-          }
-
-          return { compound, bbb, cyp2e1, cyp450 };
-        };
-
-        // Concurrency-limited pool (avoid hammering ChEMBL)
-        const concurrency = 5;
-        const results: ScreeningResult[] = [];
-        let i = 0;
-
-        const workers = Array.from({
-          length: Math.min(concurrency, input.compounds.length),
-        }).map(async () => {
-          while (i < input.compounds.length) {
-            const idx = i++;
-            results[idx] = await buildOne(input.compounds[idx]);
-          }
+          return { compound, bbb, cyp2e1 };
         });
-
-        await Promise.all(workers);
 
         // Save to database in background
         const userId = ctx.user?.id ?? null;
