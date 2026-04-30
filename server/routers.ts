@@ -8,6 +8,7 @@ import {
   screenCompounds,
   screenBBB,
   screenCYP2E1,
+  computeConfidenceAndRank,
 } from "./screening";
 import {
   saveScreeningSession,
@@ -191,7 +192,12 @@ export const appRouter = router({
           };
           const bbb = screenBBB(compound);
           const cyp2e1 = screenCYP2E1(compound);
-          return { compound, bbb, cyp2e1 };
+          const { confidence, rankScore } = computeConfidenceAndRank(
+            compound,
+            bbb,
+            cyp2e1
+          );
+          return { compound, bbb, cyp2e1, confidence, rankScore };
         });
 
         // Save to database in background
