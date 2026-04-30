@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import { useLocation, Link } from "wouter";
 import { Navbar } from "@/components/Navbar";
 import { LevelBadge } from "@/components/LevelBadge";
+import { ConfidenceBadge } from "@/components/ConfidenceBadge";
 import { RadarCompare } from "@/components/RadarCompare";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,8 @@ import {
 import type { ScreeningResult } from "../../../shared/types";
 
 type SortField =
+  | "rankScore"
+  | "confidence"
   | "name"
   | "mw"
   | "logP"
@@ -44,11 +47,30 @@ type SortField =
 
 type SortDirection = "asc" | "desc";
 
-const potentialOrder = { "Very High": 4, High: 3, Moderate: 2, Low: 1 };
+const potentialOrder: Record<string, number> = {
+  "Very High": 4,
+  High: 3,
+  Moderate: 2,
+  Low: 1,
+};
 
 export default function Results() {
   const [results, setResults] = useState<ScreeningResult[]>([]);
-  const [sortField, setSortField] = useState<SortField>("bbbPotential");
+  const [bbbCalibration] = useState<any[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("bbbCalibration") ?? "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [cypCalibration] = useState<any[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("cyp2e1Calibration") ?? "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [sortField, setSortField] = useState<SortField>("rankScore");
   const [sortDir, setSortDir] = useState<SortDirection>("desc");
   const [filter, setFilter] = useState("");
   const [selectedNames, setSelectedNames] = useState<Set<string>>(new Set());
@@ -78,14 +100,125 @@ export default function Results() {
   };
 
   const filteredAndSorted = useMemo(() => {
-    let data = [...results];
+    // Build calibration maps
+    const bbbMap = new Map<string, any>();
+    for (const row of bbbCalibration ?? []) {
+      const key = String(row.compound_name ?? "").trim().toLowerCase();
+      if (key) bbbMap.set(key, row);
+    }
+    const cypMap = new Map<string, any>();
+    for (const row of cypCalibration ?? []) {
+      const key = String(row.compound_name ?? "").trim().toLowerCase();
+      if (key) cypMap.set(key, row);
+    }
+
+    // Apply calibration and keep stable index
+    let data: any[] = results.map((r, _originalIndex) => {
+      const key = r.compound.name.toLowerCase();
+      const bbbLit = bbbMap.get(key);
+      const cypLit = cypMap.get(key);
+
+      // Prefer Kp,uu if provided; otherwise use %ID in brain
+      const litKpuu =
+        bbbLit && typeof bbbLit.kpuu === "number"
+          ? bbbLit.kpuu
+          : bbbLit && typeof bbbLit.kpuu_brain === "number"
+            ? bbbLit.kpuu_brain
+            : bbbLit && typeof bbbLit.kpuuBrain === "number"
+              ? bbbLit.kpuuBrain
+              : null;
+      const litPct =
+        bbbLit && typeof bbbLit.bbb_metric === "number" ? bbbLit.bbb_metric : null;
+
+      const ic50 = cypLit && typeof cypLit.ic50_uM === "number" ? cypLit.ic50_uM : null;
+
+      let adjRank: number | null = r.rankScore ?? null;
+      const notes: string[] = [];
+
+      // BBB calibration penalty/bonus
+      if (adjRank != null) {
+        const pred = r.bbb.bbbPotential;
+
+        // Kp,uu binning (higher is better)
+        if (litKpuu != null) {
+          const label = litKpuu < 0.1 ? "Low" : litKpuu <= 0.3 ? "Medium" : "High";
+          if ((pred === "Very High" || pred === "High") && label === "Low") {
+            adjRank -= 20;
+            notes.push("BBB overestimated vs Kp,uu");
+          } else if (pred === "Very High" && label === "Medium") {
+            adjRank -= 10;
+            notes.push("BBB slightly overestimated vs Kp,uu");
+          } else if (pred === "Low" && label === "High") {
+            adjRank += 10;
+            notes.push("BBB underestimated vs Kp,uu");
+          }
+        } else if (litPct != null) {
+          const label = litPct < 0.1 ? "Low" : litPct <= 0.3 ? "Medium" : "High";
+          if ((pred === "Very High" || pred === "High") && label === "Low") {
+            adjRank -= 20;
+            notes.push("BBB overestimated vs literature");
+          } else if (pred === "Very High" && label === "Medium") {
+            adjRank -= 10;
+            notes.push("BBB slightly overestimated vs literature");
+          } else if (pred === "Low" && label === "High") {
+            adjRank += 10;
+            notes.push("BBB underestimated vs literature");
+          }
+        }
+
+        // CYP2E1 calibration (lower IC50 = better)
+        if (ic50 != null) {
+          const potency = ic50 <= 1 ? "High" : ic50 <= 10 ? "Medium" : "Low";
+          const predC = r.cyp2e1.potential;
+          if ((predC === "Very High" || predC === "High") && potency === "Low") {
+            adjRank -= 20;
+            notes.push("CYP2E1 overestimated vs IC50");
+          } else if (predC === "Very High" && potency === "Medium") {
+            adjRank -= 10;
+            notes.push("CYP2E1 slightly overestimated vs IC50");
+          } else if (predC === "Low" && potency === "High") {
+            adjRank += 10;
+            notes.push("CYP2E1 underestimated vs IC50");
+          }
+        }
+
+        // Extra penalty when overall confidence is low
+        if (r.confidence?.overall?.score != null) {
+          const conf = r.confidence.overall.score / 100;
+          adjRank = Math.round(adjRank - 15 * (1 - conf));
+          if (conf < 0.5) notes.push("Low confidence penalty");
+        }
+
+        adjRank = Math.max(0, Math.min(100, adjRank));
+      }
+
+      return {
+        ...r,
+        _originalIndex,
+        _adjRank: adjRank,
+        _litKpuu: litKpuu,
+        _litPct: litPct,
+        _ic50: ic50,
+        _calibNote: notes.join("; "),
+      };
+    });
+
     if (filter.trim()) {
       const q = filter.toLowerCase();
       data = data.filter(r => r.compound.name.toLowerCase().includes(q));
     }
+
     data.sort((a, b) => {
       let valA: any, valB: any;
       switch (sortField) {
+        case "rankScore":
+          valA = a._adjRank ?? a.rankScore ?? -Infinity;
+          valB = b._adjRank ?? b.rankScore ?? -Infinity;
+          break;
+        case "confidence":
+          valA = a.confidence?.overall.score ?? -Infinity;
+          valB = b.confidence?.overall.score ?? -Infinity;
+          break;
         case "name":
           valA = a.compound.name.toLowerCase();
           valB = b.compound.name.toLowerCase();
@@ -146,7 +279,7 @@ export default function Results() {
       return 0;
     });
     return data;
-  }, [results, sortField, sortDir, filter]);
+  }, [results, sortField, sortDir, filter, bbbCalibration, cypCalibration]);
 
   // Toggle selection
   const toggleSelect = (name: string) => {
@@ -190,6 +323,15 @@ export default function Results() {
 
   const exportCSV = () => {
     const headers = [
+      "RankScore",
+      "AdjustedRankScore",
+      "ConfidenceLevel",
+      "ConfidenceScore",
+      "ConfidenceFlags",
+      "Literature_Kp,uu",
+      "Literature_%ID_in_brain",
+      "Experimental_IC50_uM",
+      "CalibrationNote",
       "Compound",
       "SMILES",
       "MW",
@@ -207,6 +349,15 @@ export default function Results() {
       "CYP2E1 Features",
     ];
     const rows = filteredAndSorted.map(r => [
+      r.rankScore ?? "",
+      (r as any)._adjRank ?? "",
+      r.confidence?.overall.level ?? "",
+      r.confidence?.overall.score ?? "",
+      r.confidence?.flags.join("; ") ?? "",
+      (r as any)._litKpuu ?? "",
+      (r as any)._litPct ?? "",
+      (r as any)._ic50 ?? "",
+      (r as any)._calibNote ?? "",
       r.compound.name,
       r.compound.smiles ?? "",
       r.compound.mw ?? "",
@@ -417,6 +568,8 @@ export default function Results() {
                         aria-label="Select all"
                       />
                     </TableHead>
+                    <SortableHeader field="rankScore">Rank</SortableHeader>
+                    <SortableHeader field="confidence">Confidence</SortableHeader>
                     <SortableHeader field="name">Compound</SortableHeader>
                     <SortableHeader field="mw">MW</SortableHeader>
                     <SortableHeader field="logP">LogP</SortableHeader>
@@ -443,7 +596,7 @@ export default function Results() {
                 </TableHeader>
                 <TableBody>
                   {filteredAndSorted.map((r, i) => {
-                    const originalIndex = results.indexOf(r);
+                    const originalIndex = (r as any)._originalIndex ?? i;
                     const isFailed = r.compound.status !== "success";
                     const isSelected = selectedNames.has(r.compound.name);
                     return (
@@ -465,6 +618,37 @@ export default function Results() {
                             }
                             aria-label={`Select ${r.compound.name}`}
                           />
+                        </TableCell>
+                        <TableCell className="font-mono text-sm font-semibold">
+                          {(() => {
+                            const adj = (r as any)._adjRank;
+                            const raw = r.rankScore;
+                            const shown = adj ?? raw;
+                            const note = (r as any)._calibNote;
+                            const litKpuu = (r as any)._litKpuu;
+                            const litPct = (r as any)._litPct;
+                            const ic50 = (r as any)._ic50;
+                            const titleParts = [
+                              raw != null ? `Raw rank: ${raw}` : null,
+                              adj != null ? `Adjusted rank: ${adj}` : null,
+                              litKpuu != null ? `Lit Kp,uu: ${litKpuu}` : null,
+                              litPct != null ? `Lit %ID in brain: ${litPct}` : null,
+                              ic50 != null ? `IC50 (uM): ${ic50}` : null,
+                              note ? `Note: ${note}` : null,
+                            ].filter(Boolean);
+                            return (
+                              <span title={titleParts.join("\n")}>
+                                {shown != null ? Math.round(shown) : "—"}
+                              </span>
+                            );
+                          })()}
+                        </TableCell>
+                        <TableCell>
+                          {r.confidence?.overall?.level ? (
+                            <ConfidenceBadge level={r.confidence.overall.level} />
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
                         </TableCell>
                         <TableCell className="font-medium text-foreground whitespace-nowrap">
                           {r.compound.name}

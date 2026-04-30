@@ -31,6 +31,18 @@ export function Navbar() {
               Results
             </NavLink>
           )}
+          <NavLink
+            href="/calibration/bbb"
+            active={location.startsWith("/calibration/bbb")}
+          >
+            BBB Cal
+          </NavLink>
+          <NavLink
+            href="/calibration/cyp2e1"
+            active={location.startsWith("/calibration/cyp2e1")}
+          >
+            CYP2E1 Cal
+          </NavLink>
           <NavLink href="/history" active={location === "/history"}>
             History
           </NavLink>
